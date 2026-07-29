@@ -8,23 +8,6 @@ const db = getDb();
 // Every company and officer returned is from a real public register.
 // ───────────────────────────────────────────────────────────────────────────
 
-async function fetchJson(url: string): Promise<any> {
-  try {
-    const r = await fetch(url, {
-      headers: { "User-Agent": "LondonRE-DataVault/1.0 (real-data-pipeline)" },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!r.ok) {
-      console.warn(`⚠️  ${url} → HTTP ${r.status}`);
-      return null;
-    }
-    return r.json();
-  } catch (e) {
-    console.warn(`⚠️  ${url} → ${(e as Error).message}`);
-    return null;
-  }
-}
-
 // ── 1. THE GAZETTE (REAL) ─────────────────────────────────────────────────
 
 export async function fetchGazetteFeed(): Promise<string> {
@@ -51,16 +34,11 @@ export async function fetchGazetteFeed(): Promise<string> {
       console.warn(`Gazette ${url} → ${r.status}`);
     } catch (e) { console.warn(`Gazette ${url} failed: ${e}`); }
   }
-  // Gazette RSS temporarily unavailable. Using known UK public companies
-  // as a temporary fallback. These are REAL companies, but without the live
-  // Gazette feed we cannot confirm which are currently in distress.
-  console.warn("Gazette RSS unavailable — using curated UK company list (feed will auto-resume when available)");
-  const companies = Object.keys(DOMAIN_MAP)
-    .filter(k => !k.includes("'"))
-    .filter((k, i, a) => a.indexOf(k) === i)
-    .slice(0, 10);
-  const items = companies.map(c => `<item><title>${c} - Notice</title></item>`).join("");
-  return `<?xml version="1.0"?><rss><channel><title>Fallback</title>${items}</channel></rss>`;
+  // Gazette RSS unavailable. Return empty — we never generate phantom flags
+  // from a static list. A healthy company in a hardcoded list is not a
+  // distressed asset, and publishing it as one violates data integrity.
+  console.warn("Gazette RSS unavailable — no distressed property flags this run");
+  return "";
 }
 
 export function extractCompanyNames(xml: string): string[] {
@@ -75,125 +53,7 @@ export function extractCompanyNames(xml: string): string[] {
   return [...new Set(names)];
 }
 
-// ── 2. OPENCORPORATES (REAL) ──────────────────────────────────────────────
-// Free public API. No key required. Sourced from Companies House register.
-// Rate limited but sufficient for our batch pipeline.
-
-const OC_BASE = "https://api.opencorporates.com/v0.4";
-
-// Real corporate domains for known UK companies.
-// Emails are INFERRED — Companies House does not store email addresses.
-const DOMAIN_MAP: Record<string, string> = {
-  "TESCO PLC": "tesco.com",
-  "TESCO": "tesco.com",
-  "BRITISH LAND COMPANY PLC": "britishland.com",
-  "BRITISH LAND": "britishland.com",
-  "LAND SECURITIES GROUP PLC": "landsecurities.com",
-  "LAND SECURITIES": "landsecurities.com",
-  "BURBERRY GROUP PLC": "burberry.com",
-  "BURBERRY": "burberry.com",
-  "SAINSBURY'S J PLC": "sainsburys.co.uk",
-  "SAINSBURY'S": "sainsburys.co.uk",
-  "SAINSBURYS": "sainsburys.co.uk",
-  "MARKS AND SPENCER GROUP PLC": "marksandspencer.com",
-  "MARKS AND SPENCER": "marksandspencer.com",
-  "NEXT PLC": "next.co.uk",
-  "NEXT": "next.co.uk",
-  "ASSOCIATED BRITISH FOODS PLC": "abf.co.uk",
-  "ASSOCIATED BRITISH FOODS": "abf.co.uk",
-  "RECKITT BENCKISER GROUP PLC": "reckitt.com",
-  "RECKITT BENCKISER": "reckitt.com",
-  "UNILEVER PLC": "unilever.com",
-  "UNILEVER": "unilever.com",
-};
-
-interface OcCompany {
-  name: string;
-  company_number: string;
-  incorporation_date: string | null;
-  company_type: string | null;
-  status: string | null;
-}
-
-interface OcOfficer {
-  name: string;
-  position: string;
-  start_date: string | null;
-}
-
-async function searchCompany(companyName: string): Promise<OcCompany | null> {
-  const q = encodeURIComponent(companyName.replace(/['']/g, "").trim());
-  const url = `${OC_BASE}/companies/search?q=${q}&jurisdiction_code=gb&per_page=5`;
-  console.log(`OC search: ${companyName}`);
-  try {
-    const data = await fetchJson(url);
-    const companies: any[] = data.results?.companies || [];
-    // Find best match: prefer exact name match, then first result
-    const match = companies.find((c: any) =>
-      c.company?.name?.toUpperCase() === companyName.toUpperCase()
-    ) || companies[0];
-    if (!match?.company) {
-      console.warn(`  No match for: ${companyName}`);
-      return null;
-    }
-    const co = match.company;
-    console.log(`  Found: ${co.name} (#${co.company_number}) — ${co.incorporation_date || "no date"}`);
-    return {
-      name: co.name,
-      company_number: co.company_number,
-      incorporation_date: co.incorporation_date || null,
-      company_type: co.company_type || null,
-      status: co.status || null,
-    };
-  } catch (e) {
-    console.warn(`  OC search failed: ${e}`);
-    return null;
-  }
-}
-
-async function getOfficers(companyNumber: string): Promise<OcOfficer[]> {
-  const url = `${OC_BASE}/companies/gb/${companyNumber}/officers?per_page=10`;
-  console.log(`OC officers: #${companyNumber}`);
-  try {
-    const data = await fetchJson(url);
-    const officers: any[] = data.results?.officers || [];
-    const resolved = officers
-      .filter((o: any) => o.officer?.name)
-      .map((o: any) => ({
-        name: o.officer.name,
-        position: o.officer.position || "unknown",
-        start_date: o.officer.start_date || null,
-      }));
-    // Only return current directors (not resigned)
-    const current = resolved.filter(o =>
-      !o.position.toLowerCase().includes("resigned") &&
-      !o.position.toLowerCase().includes("terminated")
-    );
-    console.log(`  ${current.length} current officers found`);
-    return current.slice(0, 5); // max 5 per company
-  } catch (e) {
-    console.warn(`  OC officers failed: ${e}`);
-    return [];
-  }
-}
-
-function generateEmail(name: string, companyName: string): string {
-  // Companies House does not store emails. We generate an inferred format.
-  // This is CLEARLY LABELLED as inferred in the pipeline output.
-  const parts = name.split(" ");
-  const first = (parts[0] || "contact").toLowerCase().replace(/[^a-z]/g, "");
-  const last = (parts.slice(1).join("") || "unknown").toLowerCase().replace(/[^a-z]/g, "");
-
-  // Use real domain for known companies
-  const domain = DOMAIN_MAP[companyName.toUpperCase()];
-  if (domain) return `${first}.${last}@${domain}`;
-
-  // For unknown companies, mark as inferred
-  const slug = companyName.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 20);
-  return `${first}.${last}@inferred.${slug}`;
-}
-
-// ── 3. PLANNING FEED (REAL) ───────────────────────────────────────────────
+// ── 2. PLANNING FEED (REAL) ───────────────────────────────────────────────
 
 export async function fetchPlanningFeed() {
   console.log("Planning: data.gov.uk");
@@ -212,7 +72,7 @@ export async function fetchPlanningFeed() {
   }
 }
 
-// ── 4. MAIN PIPELINE ──────────────────────────────────────────────────────
+// ── 3. MAIN PIPELINE ──────────────────────────────────────────────────────
 // Officer enrichment via OpenCorporates has been removed — the free API
 // is no longer available. The pipeline now focuses on what we CAN deliver
 // with zero credentials: Gazette insolvency notices → distressed property flags.
@@ -267,7 +127,7 @@ export async function enrichLeadsWithDirectors() {
   console.log("=== PIPELINE COMPLETE ===");
 }
 
-// ── 5. STANDALONE PIPELINE RUNNER ─────────────────────────────────────────
+// ── 4. STANDALONE PIPELINE RUNNER ─────────────────────────────────────────
 
 export async function runFullPipeline() {
   console.log("═══════════════════════════════════════");
