@@ -11,7 +11,6 @@ COPY . .
 # Build the TanStack Start app (required for serve.ts)
 RUN bun run build
 
-# Initialize DB, start server, then run pipeline in background
-# Server starts first so Render's health check passes immediately
+# Start server (pipeline runs via deploy hook or manual trigger)
 EXPOSE 3000
-CMD bun run src/db/init.ts && (bun run start &) && sleep 2 && bun run run_pipeline.ts && wait
+CMD bun run start
