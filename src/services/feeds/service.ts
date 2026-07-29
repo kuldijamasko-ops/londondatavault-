@@ -9,11 +9,20 @@ const db = getDb();
 // ───────────────────────────────────────────────────────────────────────────
 
 async function fetchJson(url: string): Promise<any> {
-  const r = await fetch(url, {
-    headers: { "User-Agent": "LondonRE-DataVault/1.0 (real-data-pipeline)" },
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status} from ${url}`);
-  return r.json();
+  try {
+    const r = await fetch(url, {
+      headers: { "User-Agent": "LondonRE-DataVault/1.0 (real-data-pipeline)" },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) {
+      console.warn(`⚠️  ${url} → HTTP ${r.status}`);
+      return null;
+    }
+    return r.json();
+  } catch (e) {
+    console.warn(`⚠️  ${url} → ${(e as Error).message}`);
+    return null;
+  }
 }
 
 // ── 1. THE GAZETTE (REAL) ─────────────────────────────────────────────────
