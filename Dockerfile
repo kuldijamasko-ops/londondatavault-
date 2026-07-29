@@ -8,6 +8,9 @@ RUN bun install --frozen-lockfile
 # Copy source
 COPY . .
 
+# Build the TanStack Start app (required for serve.ts)
+RUN bun run build
+
 # Initialize DB, start server, then run pipeline in background
 # Server starts first so Render's health check passes immediately
 EXPOSE 3000
