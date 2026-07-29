@@ -8,6 +8,7 @@ RUN bun install --frozen-lockfile
 # Copy source
 COPY . .
 
-# Initialize DB, run pipeline, then start server
+# Initialize DB, start server, then run pipeline in background
+# Server starts first so Render's health check passes immediately
 EXPOSE 3000
-CMD bun run src/db/init.ts && bun run run_pipeline.ts && bun run start
+CMD bun run src/db/init.ts && (bun run start &) && sleep 2 && bun run run_pipeline.ts && wait
