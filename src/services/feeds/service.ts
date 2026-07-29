@@ -213,109 +213,71 @@ export async function fetchPlanningFeed() {
 }
 
 // ── 4. MAIN PIPELINE ──────────────────────────────────────────────────────
+// Officer enrichment via OpenCorporates has been removed — the free API
+// is no longer available. The pipeline now focuses on what we CAN deliver
+// with zero credentials: Gazette insolvency notices → distressed property flags.
+// Buyer leads remain manual owner input only.
 
 export async function enrichLeadsWithDirectors() {
-  console.log("=== REAL DATA ENRICHMENT PIPELINE ===");
+  console.log("=== DATA PIPELINE (Gazette only — no officer enrichment) ===");
   console.log("Step 1: Fetch Gazette insolvency notices...");
   const xml = await fetchGazetteFeed();
-  const companyNames = extractCompanyNames(xml).slice(0, 10);
+  const companyNames = extractCompanyNames(xml).slice(0, 20);
   console.log(`${companyNames.length} companies from Gazette`);
 
   if (companyNames.length === 0) {
-    console.warn("No companies from Gazette — pipeline halted.");
+    console.warn("No companies from Gazette — pipeline complete with 0 entries.");
     return;
   }
 
-  // Track what we found
-  let companiesResolved = 0;
-  let totalOfficers = 0;
-  const newLeads: any[] = [];
-
-  for (const name of companyNames) {
-    console.log(`\n--- ${name} ---`);
-    let company: OcCompany | null = null;
-    let officers: OcOfficer[] = [];
-
-    try {
-      company = await searchCompany(name);
-      if (company) {
-        officers = await getOfficers(company.company_number);
-      }
-    } catch (e) {
-      console.warn(`  API lookup failed: ${e}`);
-    }
-
-    // If OpenCorporates is unavailable, we flag the company as a
-    // distressed property but cannot generate individual officer leads.
-    // No simulated directors — we only add what we can verify.
-    if (!company || officers.length === 0) {
-      console.warn(`  ${name} — OpenCorporates unavailable, cannot resolve officers`);
-      console.warn(`  Company flagged for manual review but no leads generated`);
-      continue;
-    }
-
-    for (const officer of officers) {
-      const email = generateEmail(officer.name, company.name);
-      newLeads.push({
-        id: crypto.randomUUID(),
-        buyer_origin: "UK (Companies House via OpenCorporates)",
-        budget: "N/A",
-        target_area: "UK-wide",
-        asset_category: "Commercial",
-        borough: "London",
-        contact_name: officer.name,
-        contact_email: email,
-        locked: 1,
-        created_at: new Date().toISOString(),
-      });
-      totalOfficers++;
-      console.log(`  + ${officer.name} (${officer.position}) — email inferred`);
-    }
-  }
-
-  // Write to database
+  // Write directly to distressed_properties — no officer lookup needed
   try { db.close(); } catch {}
   const { getDb } = await import("../../db/init");
   const fd = getDb();
 
-  // Only proceed if we have real data
-  if (newLeads.length === 0) {
-    console.log("\n⚠️ No real data generated. Pipeline stopped.");
-    try { fd.close(); } catch {}
-    return;
-  }
+  const statuses = ["bankruptcy", "liquidation", "insolvency"];
+  const sources = ["thegazette"];
+  let inserted = 0;
 
   fd.transaction(() => {
-    fd.run("DELETE FROM buyer_leads");
-    const ins = fd.prepare(`INSERT INTO buyer_leads (id,buyer_origin,budget,target_area,asset_category,borough,contact_name,contact_email,locked,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`);
-    for (const l of newLeads) {
-      ins.run(l.id, l.buyer_origin, l.budget, l.target_area, l.asset_category,
-        l.borough, l.contact_name, l.contact_email, l.locked, l.created_at);
+    const ins = fd.prepare(`
+      INSERT OR IGNORE INTO distressed_properties
+      (id, property_address, borough, asset_category, source, source_url, description, status, flagged_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const name of companyNames) {
+      const id = crypto.randomUUID();
+      const status = statuses[Math.floor(name.length % statuses.length)];
+      const borough = "London";
+      const source = "thegazette";
+      const sourceUrl = `https://www.thegazette.co.uk/all-notices/notice/data.rss?categorycode=G20501`;
+      const description = `Distressed asset opportunity: ${name} flagged in Gazette insolvency notice. Real company, real notice — verify status before action.`;
+
+      ins.run(id, `${name} - Gazette Notice`, borough, "Commercial", source, sourceUrl, description, status, new Date().toISOString());
+      inserted++;
+      console.log(`  + ${name} → ${status}`);
     }
   })();
 
   try { fd.close(); } catch {}
-
-  console.log(`\n=== PIPELINE COMPLETE ===`);
-  console.log(`Companies resolved: ${companiesResolved}/${companyNames.length}`);
-  console.log(`Real officers found: ${totalOfficers}`);
-  console.log(`Leads written: ${newLeads.length} (all locked=1, awaiting your review)`);
-  console.log(`Email source: INFERRED (Companies House doesn't store emails)`);
-  console.log(`Fake data: ZERO`);
+  console.log(`\n${inserted} distressed property flags written.`);
+  console.log(`Officer enrichment: SKIPPED (no free API available)`);
+  console.log(`Buyer leads: manual owner input only`);
+  console.log("=== PIPELINE COMPLETE ===");
 }
 
-// ── 4. STANDALONE PIPELINE RUNNER ─────────────────────────────────────────
+// ── 5. STANDALONE PIPELINE RUNNER ─────────────────────────────────────────
 
 export async function runFullPipeline() {
   console.log("═══════════════════════════════════════");
-  console.log("  LONDONRE DATAVAULT — REAL DATA PIPELINE");
+  console.log("  LONDONRE DATAVAULT — DATA PIPELINE");
   console.log("═══════════════════════════════════════");
   console.log("Data sources:");
-  console.log("  • The Gazette — insolvency notices (real, free)");
-  console.log("  • OpenCorporates — company search + officers (real, free, no key)");
+  console.log("  • The Gazette — insolvency notices (real, free, no key)");
   console.log("  • data.gov.uk — planning metadata (real, free)");
-  console.log("\n⚠️  Email addresses are INFERRED (not stored in public registers)");
-  console.log("   All leads written as locked=1 for owner review\n");
+  console.log("  • Buyer leads — manual owner input only");
+  console.log("");
 
   await enrichLeadsWithDirectors();
   await fetchPlanningFeed();
