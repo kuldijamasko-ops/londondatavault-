@@ -1,7 +1,11 @@
 import { Database } from "bun:sqlite";
-import { join } from "path";
+import { join, dirname } from "path";
+import { mkdirSync } from "fs";
 
 const DB_PATH = join(process.cwd(), "data", "vault.db");
+
+// Auto-create data directory if needed
+try { mkdirSync(dirname(DB_PATH), { recursive: true }); } catch {}
 
 export function getDb() {
   return new Database(DB_PATH);
