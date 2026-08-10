@@ -11,6 +11,6 @@ COPY . .
 # Build the TanStack Start app (required for serve.ts)
 RUN bun run build
 
-# Initialize DB, then start server
+# Init DB, start server immediately, then populate data pipeline
 EXPOSE 3000
-CMD bun run src/db/init.ts && bun run start
+CMD bun run src/db/init.ts && (bun run start &) && sleep 3 && bun run run_pipeline.ts && wait
