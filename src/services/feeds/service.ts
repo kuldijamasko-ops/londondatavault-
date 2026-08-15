@@ -261,9 +261,6 @@ export async function enrichLeadsWithDirectors() {
   console.log("Filter: London postcodes only (EC, WC, E, N, NW, SE, SW, W)");
   console.log("");
 
-  // Close the initial db connection so we can reopen fresh inside each step
-  try { db.close(); } catch {}
-
   let allEntries: Array<{
     id: string;
     property_address: string;
@@ -351,13 +348,10 @@ export async function enrichLeadsWithDirectors() {
   console.log(`Auction: ${allEntries.filter(e => e.source === 'auction-rightmove').length} entries\n`);
 
   // ── Write to database ──
-  const { getDb } = await import("../../db/init");
-  const fd = getDb();
-
   let inserted = 0;
   if (allEntries.length > 0) {
-    fd.transaction(() => {
-      const ins = fd.prepare(`
+    db.transaction(() => {
+      const ins = db.prepare(`
         INSERT OR IGNORE INTO distressed_properties
         (id, property_address, borough, asset_category, source, source_url, description, status, flagged_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -374,8 +368,6 @@ export async function enrichLeadsWithDirectors() {
       }
     })();
   }
-
-  try { fd.close(); } catch {}
 
   console.log(`\n═══════════════════════════════════════`);
   console.log(`  TOTAL: ${inserted} distressed property flags written`);
