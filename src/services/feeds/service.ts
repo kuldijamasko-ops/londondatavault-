@@ -1,6 +1,13 @@
 import { getDb } from "../../db/init";
+import {
+  ckanSearch, ckanShow, resolveRawCsvUrl, downloadText, parseCsv,
+  hasLondonPostcode as ckanHasLondonPostcode, isLondonOrganisation,
+  type CkanDataset,
+} from "./ckan";
 
 const db = getDb();
+
+export { fetchPlanningFeed as fetchGazetteFeed };
 
 // ── ARCHITECTURE RULE: REAL DATA ONLY ─────────────────────────────────────
 // This module sources data exclusively from live, free, public data sources.
@@ -251,7 +258,116 @@ async function scrapeAuctionListings(): Promise<AuctionEntry[]> {
   return results;
 }
 
-// ── 4. MAIN PIPELINE ──────────────────────────────────────────────────────
+// ── 4. CKAN data.gov.uk — REAL LONDON BUSINESS RATES / DISTRESSED ─────────
+// This is the PRIMARY source. It writes real property records (with real
+// addresses, ratepayers, rateable values and vacant/empty flags) that are
+// downloaded from data.gov.uk-published CSV files.
+
+interface CkanEntry {
+  address: string;
+  postcode: string;
+  ratepayer: string;
+  borough: string;
+  propDesc: string;
+  rv: string;
+  distress: string; // "empty" | "exempt" | "business-rates"
+  source: string;
+  sourceUrl: string;
+  description: string;
+  flaggedAt: string;
+}
+
+async function fetchCkanBusinessRates(): Promise<CkanEntry[]> {
+  const entries: CkanEntry[] = [];
+  const queries = [
+    "business rates london",
+    "empty commercial property london",
+    "business rates empty property london",
+    "NNDR london",
+  ];
+  const seenPackages = new Set<string>();
+  const totalBudget = 4; // process at most this many distinct real packages
+
+  for (const q of queries) {
+    if (entries.length >= 250) break;
+    const datasets = await ckanSearch(q, 20);
+    for (const ds of datasets) {
+      if (entries.length >= 250) break;
+      if (seenPackages.has(ds.name)) continue;
+      // Only process packages that look like London business-rates data
+      const orgTitle = ds.organization?.title || "";
+      const blob = `${ds.title} ${ds.notes || ""} ${orgTitle}`.toLowerCase();
+      if (!/business rates|nndr|empty propert|rateable|national non.?domestic/i.test(blob)) continue;
+      if (!isLondonOrganisation(orgTitle) && !/london/.test(blob)) {
+        // allow if notes mention London but skip clearly non-London council datasets
+        if (/leeds|mancher|york|birmingham|bristol/.test(orgTitle)) continue;
+      }
+      seenPackages.add(ds.name);
+      if (seenPackages.size > totalBudget) break;
+
+      const shown = await ckanShow(ds.name);
+      if (!shown || !shown.resources?.length) continue;
+
+      // pick the newest-ish CSV/XLSX resource; prefer CSV
+      const csvResources = shown.resources.filter(r => /csv|xlsx|xls/i.test(r.format || "") || /\.(csv|xlsx|xls)/i.test(r.url || ""));
+      const resource = csvResources[0] || shown.resources[0];
+      if (!resource?.url) continue;
+      console.log(`  CKAN processing: ${ds.title} (${orgTitle})`);
+
+      const rawUrl = await resolveRawCsvUrl(resource.url);
+      if (!rawUrl) { console.warn(`    no raw CSV for ${resource.url}`); continue; }
+      const text = await downloadText(rawUrl);
+      if (!text) { console.warn(`    download failed ${rawUrl}`); continue; }
+      const rows = parseCsv(text);
+      console.log(`    parsed ${rows.length} rows`);
+
+      for (const row of rows) {
+        if (entries.length >= 250) break;
+        const pcode = (row["prop_pcode"] || row["Postcode"] || row["postcode"] || "").trim();
+        const addr1 = row["prop_addr1"] || row["Address1"] || row["Address"] || "";
+        const addr2 = row["prop_addr2"] || "";
+        const addr3 = row["prop_addr3"] || "";
+        const addr4 = row["prop_addr4"] || "";
+        const ratepayer = (row["ratepayer"] || row["Occupier"] || row["ratepayer name"] || "").trim();
+        const emptyFrom = (row["empty_from"] || row["empty_from_date"] || "").trim();
+        const exemptFrom = (row["exempt_from"] || row["exemption_from"] || "").trim();
+        const exemptType = (row["exemption_type"] || "").trim();
+        const rv = (row["rv_2017"] || row["current rv"] || row["Rateable Value"] || row["rv"] || "").trim();
+        const propDesc = (row["prop_descrip"] || row["Property Type"] || row["Description"] || "").trim();
+
+        const addrText = [addr1, addr2, addr3, addr4].filter(Boolean).join(", ");
+        const fullAddr = [addrText, pcode].filter(Boolean).join(", ");
+
+        if (!fullAddr) continue;
+        const londonMatch = ckanHasLondonPostcode(`${addrText} ${pcode}`);
+        if (!londonMatch) continue;
+
+        let distress = "business-rates";
+        if (emptyFrom || exemptFrom || exemptType) distress = emptyFrom ? "empty" : "exempt";
+
+        const borough = /london borough of ([\w ]+)/i.exec(orgTitle)?.[1]?.trim() || (isLondonOrganisation(orgTitle) ? (orgTitle.replace(/london borough of/i, "").replace(/borough of/i, "").trim() || "London") : "London") || "London";
+
+        entries.push({
+          address: fullAddr,
+          postcode: pcode,
+          ratepayer,
+          borough,
+          propDesc,
+          rv,
+          distress,
+          source: `ckan-${(orgTitle || ds.name).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30)}`,
+          sourceUrl: resource.url,
+          description: `data.gov.uk ${ds.title}: ${ratepayer || "ratepayer not disclosed"}${propDesc ? `, ${propDesc}` : ""}${rv ? `, RV £${rv}` : ""}. Source: ${orgTitle}.`,
+          flaggedAt: ds.metadata_modified || new Date().toISOString(),
+        });
+      }
+      await new Promise(r => setTimeout(r, 1200)); // throttle between packages
+    }
+  }
+  return entries;
+}
+
+// ── 5. MAIN PIPELINE ──────────────────────────────────────────────────────
 
 export async function enrichLeadsWithDirectors() {
   console.log("═══════════════════════════════════════");
@@ -272,6 +388,28 @@ export async function enrichLeadsWithDirectors() {
     status: string;
     flagged_at: string;
   }> = [];
+
+  // ── Step 0: CKAN data.gov.uk — REAL London business-rates/distressed data ──
+  console.log("── Step 0: data.gov.uk CKAN (real London business rates) ──");
+  try {
+    const ckanEntries = await fetchCkanBusinessRates();
+    console.log(`CKAN: ${ckanEntries.length} real London property records`);
+    for (const entry of ckanEntries) {
+      allEntries.push({
+        id: crypto.randomUUID(),
+        property_address: entry.address,
+        borough: entry.borough,
+        asset_category: "Commercial",
+        source: entry.source,
+        source_url: entry.sourceUrl,
+        description: entry.description,
+        status: entry.distress,
+        flagged_at: entry.flaggedAt,
+      });
+    }
+  } catch (e) {
+    console.warn(`CKAN step failed: ${e}`);
+  }
 
   // ── Step 1: Gazette Insolvency Notices ──
   console.log("── Step 1: Gazette Insolvency Notices ──");
@@ -371,6 +509,7 @@ export async function enrichLeadsWithDirectors() {
 
   console.log(`\n═══════════════════════════════════════`);
   console.log(`  TOTAL: ${inserted} distressed property flags written`);
+  console.log(`  CKAN/data.gov.uk: ${allEntries.filter(e => e.source.startsWith('ckan-')).length}`);
   console.log(`  Gazette:  ${allEntries.filter(e => e.source.startsWith('thegazette')).length}`);
   console.log(`  Council:  ${allEntries.filter(e => e.source.startsWith('council')).length}`);
   console.log(`  Auction:  ${allEntries.filter(e => e.source === 'auction-rightmove').length}`);
@@ -381,24 +520,14 @@ export async function enrichLeadsWithDirectors() {
 // ── 5. PLANNING FEED ──────────────────────────────────────────────────────
 
 export async function fetchPlanningFeed() {
-  console.log("Planning: data.gov.uk");
+  console.log("Planning: data.gov.uk (CKAN)");
   try {
-    const r = await fetch(
-      "https://data.gov.uk/api/3/action/package_search?q=planning+application+london&rows=10",
-      {
-        headers: { "User-Agent": UA },
-        signal: AbortSignal.timeout(10000),
-      }
-    );
-    const data = await r.json();
+    const data = await ckanSearch("planning application london", 10);
     try {
-      const { getDb } = await import("../../db/init");
-      const pdb = getDb();
-      pdb.prepare(`INSERT OR REPLACE INTO feed_cache (id,feed_name,feed_url,raw_data,fetched_at) VALUES (?,?,?,?,?)`)
-        .run(crypto.randomUUID(), "planning", r.url, JSON.stringify(data), new Date().toISOString());
-      try { pdb.close(); } catch {}
+      db.prepare(`INSERT OR REPLACE INTO feed_cache (id,feed_name,feed_url,raw_data,fetched_at) VALUES (?,?,?,?,?)`)
+        .run(crypto.randomUUID(), "planning", "https://ckan.publishing.service.gov.uk/api/3/action/package_search?q=planning+application+london", JSON.stringify({ result: { results: data } }), new Date().toISOString());
     } catch {}
-    return data;
+    return { result: { results: data } };
   } catch (e) {
     console.warn(`Planning feed failed: ${e}`);
     return null;
