@@ -279,91 +279,154 @@ interface CkanEntry {
 
 async function fetchCkanBusinessRates(): Promise<CkanEntry[]> {
   const entries: CkanEntry[] = [];
-  const queries = [
-    "business rates london",
-    "empty commercial property london",
-    "business rates empty property london",
-    "NNDR london",
-  ];
-  const seenPackages = new Set<string>();
-  const totalBudget = 4; // process at most this many distinct real packages
+  const MAX_ENTRIES = 2000; // raised from 250 to cover multiple boroughs
 
-  for (const q of queries) {
-    if (entries.length >= 250) break;
+  // ── Phase 1: per-borough targeted queries (priority boroughs first) ──
+  const priorityBoroughs = [
+    "Hounslow", "Westminster", "Barnet", "Ealing", "Croydon",
+  ];
+  const otherBoroughs = [
+    "Brent", "Camden", "Greenwich", "Hackney", "Hammersmith and Fulham",
+    "Haringey", "Harrow", "Havering", "Hillingdon", "Islington",
+    "Kensington and Chelsea", "Kingston upon Thames", "Lambeth", "Lewisham",
+    "Merton", "Newham", "Redbridge", "Richmond upon Thames", "Southwark",
+    "Sutton", "Tower Hamlets", "Waltham Forest", "Wandsworth",
+    "Barking and Dagenham", "Bexley", "Bromley", "Enfield",
+    "City of London",
+  ];
+
+  const allBoroughs = [...priorityBoroughs, ...otherBoroughs];
+  const seenPackages = new Set<string>();
+
+  // Extract borough name from org title like "London Borough of Hounslow" → "Hounslow"
+  function extractBorough(orgTitle: string): string {
+    const m = /london borough of ([\w ]+)/i.exec(orgTitle);
+    if (m) return m[1].trim();
+    // Try city of westminster etc.
+    const m2 = /city of ([\w ]+)/i.exec(orgTitle);
+    if (m2) return m2[1].trim();
+    // Royal Borough of ...
+    const m3 = /royal borough of ([\w ]+)/i.exec(orgTitle);
+    if (m3) return m3[1].trim();
+    if (isLondonOrganisation(orgTitle)) {
+      return orgTitle.replace(/london borough of/i, "").replace(/borough of/i, "").replace(/royal/i, "").trim() || "London";
+    }
+    return "London";
+  }
+
+  async function processDataset(ds: CkanDataset, orgTitle: string, boroughHint: string): Promise<number> {
+    if (seenPackages.has(ds.name)) return 0;
+    seenPackages.add(ds.name);
+
+    const shown = await ckanShow(ds.name);
+    if (!shown || !shown.resources?.length) return 0;
+
+    const csvResources = shown.resources.filter(r => /csv|xlsx|xls/i.test(r.format || "") || /\.(csv|xlsx|xls)/i.test(r.url || ""));
+    const resource = csvResources[0] || shown.resources[0];
+    if (!resource?.url) return 0;
+    console.log(`  CKAN processing: ${ds.title} (${orgTitle})`);
+
+    const rawUrl = await resolveRawCsvUrl(resource.url);
+    if (!rawUrl) { console.warn(`    no raw CSV for ${resource.url}`); return 0; }
+    const text = await downloadText(rawUrl);
+    if (!text) { console.warn(`    download failed ${rawUrl}`); return 0; }
+    const rows = parseCsv(text);
+    console.log(`    parsed ${rows.length} rows`);
+
+    let added = 0;
+    for (const row of rows) {
+      if (entries.length >= MAX_ENTRIES) break;
+      const pcode = (row["prop_pcode"] || row["Postcode"] || row["postcode"] || "").trim();
+      const addr1 = row["prop_addr1"] || row["Address1"] || row["Address"] || "";
+      const addr2 = row["prop_addr2"] || "";
+      const addr3 = row["prop_addr3"] || "";
+      const addr4 = row["prop_addr4"] || "";
+      const ratepayer = (row["ratepayer"] || row["Occupier"] || row["ratepayer name"] || "").trim();
+      const emptyFrom = (row["empty_from"] || row["empty_from_date"] || "").trim();
+      const exemptFrom = (row["exempt_from"] || row["exemption_from"] || "").trim();
+      const exemptType = (row["exemption_type"] || "").trim();
+      const rv = (row["rv_2017"] || row["current rv"] || row["Rateable Value"] || row["rv"] || "").trim();
+      const propDesc = (row["prop_descrip"] || row["Property Type"] || row["Description"] || "").trim();
+
+      const addrText = [addr1, addr2, addr3, addr4].filter(Boolean).join(", ");
+      const fullAddr = [addrText, pcode].filter(Boolean).join(", ");
+
+      if (!fullAddr) continue;
+      if (!ckanHasLondonPostcode(`${addrText} ${pcode}`)) continue;
+
+      let distress = "business-rates";
+      if (emptyFrom || exemptFrom || exemptType) distress = emptyFrom ? "empty" : "exempt";
+
+      const borough = extractBorough(orgTitle);
+      const sourceOrg = boroughHint || orgTitle || ds.name;
+
+      entries.push({
+        address: fullAddr,
+        postcode: pcode,
+        ratepayer,
+        borough,
+        propDesc,
+        rv,
+        distress,
+        source: `ckan-${sourceOrg.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30)}`,
+        sourceUrl: resource.url,
+        description: `data.gov.uk ${ds.title}: ${ratepayer || "ratepayer not disclosed"}${propDesc ? `, ${propDesc}` : ""}${rv ? `, RV £${rv}` : ""}. Source: ${orgTitle}.`,
+        flaggedAt: ds.metadata_modified || new Date().toISOString(),
+      });
+      added++;
+    }
+    return added;
+  }
+
+  // ── Phase 1: Search per borough ──
+  console.log("  Phase 1: Per-borough CKAN search...");
+  for (const borough of allBoroughs) {
+    if (entries.length >= MAX_ENTRIES) break;
+    // search both "business rates <borough>" and "NNDR <borough>"
+    for (const suffix of ["business rates", "NNDR", "empty properties"]) {
+      if (entries.length >= MAX_ENTRIES) break;
+      const q = `${suffix} ${borough}`;
+      const datasets = await ckanSearch(q, 10);
+      for (const ds of datasets) {
+        if (entries.length >= MAX_ENTRIES) break;
+        const orgTitle = ds.organization?.title || "";
+        const blob = `${ds.title} ${ds.notes || ""} ${orgTitle}`.toLowerCase();
+        if (!/business rates|nndr|empty propert|rateable|national non.?domestic/i.test(blob)) continue;
+        if (!isLondonOrganisation(orgTitle) && !/london/.test(blob)) continue;
+
+        const added = await processDataset(ds, orgTitle, borough);
+        if (added > 0) {
+          await new Promise(r => setTimeout(r, 1200)); // throttle
+        }
+      }
+    }
+  }
+
+  // ── Phase 2: generic London-wide queries for any missed packages ──
+  console.log("  Phase 2: Generic London CKAN search...");
+  const genericQueries = [
+    "business rates london",
+    "business rates empty property london",
+    "NNDR london borough",
+  ];
+  for (const q of genericQueries) {
+    if (entries.length >= MAX_ENTRIES) break;
     const datasets = await ckanSearch(q, 20);
     for (const ds of datasets) {
-      if (entries.length >= 250) break;
-      if (seenPackages.has(ds.name)) continue;
-      // Only process packages that look like London business-rates data
+      if (entries.length >= MAX_ENTRIES) break;
       const orgTitle = ds.organization?.title || "";
       const blob = `${ds.title} ${ds.notes || ""} ${orgTitle}`.toLowerCase();
       if (!/business rates|nndr|empty propert|rateable|national non.?domestic/i.test(blob)) continue;
-      if (!isLondonOrganisation(orgTitle) && !/london/.test(blob)) {
-        // allow if notes mention London but skip clearly non-London council datasets
-        if (/leeds|mancher|york|birmingham|bristol/.test(orgTitle)) continue;
+      if (!isLondonOrganisation(orgTitle)) continue;
+
+      const added = await processDataset(ds, orgTitle, "");
+      if (added > 0) {
+        await new Promise(r => setTimeout(r, 1200));
       }
-      seenPackages.add(ds.name);
-      if (seenPackages.size > totalBudget) break;
-
-      const shown = await ckanShow(ds.name);
-      if (!shown || !shown.resources?.length) continue;
-
-      // pick the newest-ish CSV/XLSX resource; prefer CSV
-      const csvResources = shown.resources.filter(r => /csv|xlsx|xls/i.test(r.format || "") || /\.(csv|xlsx|xls)/i.test(r.url || ""));
-      const resource = csvResources[0] || shown.resources[0];
-      if (!resource?.url) continue;
-      console.log(`  CKAN processing: ${ds.title} (${orgTitle})`);
-
-      const rawUrl = await resolveRawCsvUrl(resource.url);
-      if (!rawUrl) { console.warn(`    no raw CSV for ${resource.url}`); continue; }
-      const text = await downloadText(rawUrl);
-      if (!text) { console.warn(`    download failed ${rawUrl}`); continue; }
-      const rows = parseCsv(text);
-      console.log(`    parsed ${rows.length} rows`);
-
-      for (const row of rows) {
-        if (entries.length >= 250) break;
-        const pcode = (row["prop_pcode"] || row["Postcode"] || row["postcode"] || "").trim();
-        const addr1 = row["prop_addr1"] || row["Address1"] || row["Address"] || "";
-        const addr2 = row["prop_addr2"] || "";
-        const addr3 = row["prop_addr3"] || "";
-        const addr4 = row["prop_addr4"] || "";
-        const ratepayer = (row["ratepayer"] || row["Occupier"] || row["ratepayer name"] || "").trim();
-        const emptyFrom = (row["empty_from"] || row["empty_from_date"] || "").trim();
-        const exemptFrom = (row["exempt_from"] || row["exemption_from"] || "").trim();
-        const exemptType = (row["exemption_type"] || "").trim();
-        const rv = (row["rv_2017"] || row["current rv"] || row["Rateable Value"] || row["rv"] || "").trim();
-        const propDesc = (row["prop_descrip"] || row["Property Type"] || row["Description"] || "").trim();
-
-        const addrText = [addr1, addr2, addr3, addr4].filter(Boolean).join(", ");
-        const fullAddr = [addrText, pcode].filter(Boolean).join(", ");
-
-        if (!fullAddr) continue;
-        const londonMatch = ckanHasLondonPostcode(`${addrText} ${pcode}`);
-        if (!londonMatch) continue;
-
-        let distress = "business-rates";
-        if (emptyFrom || exemptFrom || exemptType) distress = emptyFrom ? "empty" : "exempt";
-
-        const borough = /london borough of ([\w ]+)/i.exec(orgTitle)?.[1]?.trim() || (isLondonOrganisation(orgTitle) ? (orgTitle.replace(/london borough of/i, "").replace(/borough of/i, "").trim() || "London") : "London") || "London";
-
-        entries.push({
-          address: fullAddr,
-          postcode: pcode,
-          ratepayer,
-          borough,
-          propDesc,
-          rv,
-          distress,
-          source: `ckan-${(orgTitle || ds.name).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30)}`,
-          sourceUrl: resource.url,
-          description: `data.gov.uk ${ds.title}: ${ratepayer || "ratepayer not disclosed"}${propDesc ? `, ${propDesc}` : ""}${rv ? `, RV £${rv}` : ""}. Source: ${orgTitle}.`,
-          flaggedAt: ds.metadata_modified || new Date().toISOString(),
-        });
-      }
-      await new Promise(r => setTimeout(r, 1200)); // throttle between packages
     }
   }
+
+  console.log(`  CKAN total entries: ${entries.length}`);
   return entries;
 }
 

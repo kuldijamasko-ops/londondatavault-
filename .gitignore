@@ -18,4 +18,3 @@ node_modules
 src/routeTree.gen.ts
 
 # SQLite database (generated at runtime)
-/data/vault.db
