@@ -1,7 +1,42 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { TIERS } from "~/services/tiers";
-import { createOrder, captureOrder } from "~/services/checkout";
+
+/**
+ * The page talks to the /api/paypal/* HTTP routes rather than to
+ * createServerFn RPC endpoints. Same server-side service layer behind both,
+ * but a plain fetch is easy to exercise with curl and has no build-time RPC
+ * wiring to get wrong. No credential ever reaches the browser.
+ */
+async function createOrder(tierId: string): Promise<{ approveUrl?: string; error?: string }> {
+  const res = await fetch("/api/paypal/create-order", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tierId }),
+  });
+  return (await res.json()) as { approveUrl?: string; error?: string };
+}
+
+async function captureOrder(orderId: string): Promise<{
+  status: string;
+  tier: string | null;
+  amount: number | null;
+  currency: string | null;
+  error?: string;
+}> {
+  const res = await fetch("/api/paypal/capture-order", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ orderId }),
+  });
+  return (await res.json()) as {
+    status: string;
+    tier: string | null;
+    amount: number | null;
+    currency: string | null;
+    error?: string;
+  };
+}
 
 export const Route = createFileRoute("/pricing")({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -40,9 +75,13 @@ function PricingPage() {
 
     const orderId = search.token;
     setCaptureState("processing");
-    captureOrder({ data: { orderId } })
-      .then((res) => {
-        if (res.status === "COMPLETED") {
+    void (async () => {
+      try {
+        const res = await captureOrder(orderId);
+        if (res.error) {
+          setCaptureResult(`Could not confirm the payment: ${res.error}`);
+          setCaptureState("failed");
+        } else if (res.status === "COMPLETED") {
           setCaptureResult(
             `Payment received${res.tier ? ` — ${res.tier} access unlocked` : ""}. ` +
               `£${(res.amount ?? 0).toFixed(2)} ${res.currency || "GBP"}. ` +
@@ -53,28 +92,24 @@ function PricingPage() {
           setCaptureResult(`PayPal returned status "${res.status}" — the payment was not completed.`);
           setCaptureState("failed");
         }
-      })
-      .catch((e: unknown) => {
-        setCaptureResult(
-          e instanceof Error
-            ? `Could not confirm the payment: ${e.message}`
-            : "Could not confirm the payment with PayPal."
-        );
+      } catch {
+        setCaptureResult("Could not confirm the payment with PayPal.");
         setCaptureState("failed");
-      });
+      }
+    })();
   }, [search.checkout, search.token]);
 
   async function handleSubscribe(tierId: string) {
     setBusyTier(tierId);
     setError(null);
     try {
-      const { approveUrl } = await createOrder({ data: { tierId } });
+      const { approveUrl, error: apiError } = await createOrder(tierId);
       if (approveUrl) {
         window.location.href = approveUrl;
-      } else {
-        setError("PayPal did not return an approval link. Please try again.");
-        setBusyTier(null);
+        return;
       }
+      setError(apiError || "PayPal did not return an approval link. Please try again.");
+      setBusyTier(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Could not start checkout. Please try again.");
       setBusyTier(null);
