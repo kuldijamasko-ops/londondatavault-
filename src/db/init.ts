@@ -7,8 +7,26 @@ const DB_PATH = join(process.cwd(), "data", "vault.db");
 // Auto-create data directory if needed
 try { mkdirSync(dirname(DB_PATH), { recursive: true }); } catch {}
 
+// One connection per process. Opening a fresh Database on every call leaked a
+// file handle per request and made writes contend with themselves.
+let _db: Database | null = null;
+
 export function getDb() {
-  return new Database(DB_PATH);
+  if (!_db) _db = new Database(DB_PATH);
+  return _db;
+}
+
+// Lazily run the schema bootstrap exactly once per process. The shipped
+// data/vault.db predates the `orders` table, so anything touching orders must
+// go through ensureDb() rather than assuming the table exists.
+let _initialized = false;
+
+export function ensureDb() {
+  if (!_initialized) {
+    initDb();
+    _initialized = true;
+  }
+  return getDb();
 }
 
 export function initDb() {
@@ -59,6 +77,42 @@ export function initDb() {
       fetched_at TEXT
     )
   `);
+
+  // PayPal checkout orders. This table exists for unlock logic, NOT accounting:
+  // the authoritative money view is the owner's PayPal dashboard (the platform's
+  // finance tooling reads Stripe only). amount_gbp is REAL because tiers are
+  // £199 / £499 / £1250, not integers, and PayPal reports captured amounts as
+  // decimal strings.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id TEXT PRIMARY KEY,
+      tier TEXT,
+      amount_gbp REAL,
+      currency TEXT DEFAULT 'GBP',
+      status TEXT,
+      paypal_order_id TEXT,
+      paypal_capture_id TEXT,
+      captured_amount_gbp REAL,
+      paypal_mode TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    )
+  `);
+  db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_paypal_order_id ON orders (paypal_order_id)`);
+
+  // Additive migrations for databases created before the columns above existed.
+  // SQLite has no "ADD COLUMN IF NOT EXISTS", so check the table info first.
+  const existingCols = new Set(
+    (db.query(`PRAGMA table_info(orders)`).all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  const addCol = (name: string, decl: string) => {
+    if (!existingCols.has(name)) db.run(`ALTER TABLE orders ADD COLUMN ${name} ${decl}`);
+  };
+  addCol("currency", "TEXT DEFAULT 'GBP'");
+  addCol("paypal_capture_id", "TEXT");
+  addCol("captured_amount_gbp", "REAL");
+  addCol("paypal_mode", "TEXT");
+  addCol("updated_at", "TEXT");
 
   const boroughs = [
     "Barking and Dagenham", "Barnet", "Bexley", "Brent", "Bromley", "Camden", "Croydon",

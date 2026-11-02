@@ -38,6 +38,12 @@ function StagingLayout() {
           >
             Planning Alerts
           </Link>
+          <Link
+            to="/pricing"
+            className="flex items-center px-6 py-3 text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700 [&.active]:bg-indigo-50 [&.active]:text-indigo-600 [&.active]:border-r-4 [&.active]:border-indigo-600"
+          >
+            Plans &amp; Billing
+          </Link>
         </nav>
       </aside>
       <main className="flex-1 overflow-auto">
