@@ -53,7 +53,7 @@ export const Route = createFileRoute("/pricing")({
       {
         name: "description",
         content:
-          "Off-market commercial property intelligence from real UK government data. Starter £199/mo, Pro £499/mo, Enterprise from £1,250/mo.",
+          "Distress signals from published UK council business-rates data — commercial properties recorded as empty or receiving exemption relief, each with address, ratepayer and rateable value. Starter £199/mo, Pro £499/mo, Enterprise from £1,250/mo.",
       },
     ],
   }),
@@ -159,12 +159,13 @@ function PricingPage() {
       <div className="mx-auto max-w-6xl px-6 py-14">
         <div className="mb-12 text-center">
           <h1 className="text-4xl font-bold text-gray-900 dark:text-white">
-            Off-market property intelligence, priced plainly
+            Distress signals from published council data, priced plainly
           </h1>
           <p className="mx-auto mt-3 max-w-2xl text-lg text-gray-600 dark:text-gray-400">
-            Distressed and empty commercial property flagged from real UK government
-            business-rates data — before it reaches the commercial listings. No paid data
-            subscriptions, no long contract.
+            We read the business-rates data councils already publish and flag the commercial
+            properties recorded as empty, or receiving empty-property or exemption relief — a
+            distress signal surfaced from the council&rsquo;s own published record, earlier than a
+            commercial listing. No paid data subscriptions, no long contract.
           </p>
         </div>
 
@@ -198,6 +199,8 @@ function PricingPage() {
             {error}
           </div>
         )}
+
+        <OfferNarrative />
 
         <SampleFlagsSection
           flags={flags}
@@ -268,6 +271,40 @@ function PricingPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The offer narrative approved by the owner (marketing-starter-pack.md,
+ * section (a)) — 118 words, heading included, reproduced as written. Nothing
+ * here goes beyond the pack's honesty rules: two boroughs, no claim that any
+ * property is for sale, vacant today or off-market, no urgency device.
+ */
+function OfferNarrative() {
+  return (
+    <section className="mb-12 rounded-2xl border border-gray-200 bg-white p-8 text-center dark:border-gray-800 dark:bg-gray-900">
+      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
+        Most commercial property data costs more than the research is worth.
+      </h2>
+      <div className="mx-auto mt-4 max-w-2xl space-y-4 text-gray-600 dark:text-gray-300">
+        <p>
+          We built the opposite. We read the business-rates data councils already publish, and
+          surface the commercial properties recorded as empty, or receiving empty-property or
+          exemption relief.
+        </p>
+        <p>
+          Right now that is <strong className="text-gray-900 dark:text-white">2,000 verified London business-rates records</strong>,
+          including <strong className="text-gray-900 dark:text-white">432 distress flags — 328 recorded empty, 104 exempt</strong> —
+          from Hounslow and Camden council published data. Every record carries a real address,
+          ratepayer and rateable value, and links back to the council dataset it came from. You can
+          check any line yourself.
+        </p>
+        <p>No paid data subscriptions. No long contract. One month at a time, cancel whenever you like.</p>
+        <p className="font-semibold text-gray-900 dark:text-white">
+          See five real flags free on this page, then pick the tier that fits.
+        </p>
+      </div>
+    </section>
   );
 }
 
